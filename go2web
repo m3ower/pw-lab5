@@ -1,0 +1,181 @@
+#!/usr/bin/env node
+'use strict';
+
+const net = require('net');
+const tls = require('tls');
+const { URL } = require('url');
+
+const args = process.argv.slice(2);
+
+// ---------------------------------------------------------------------------
+// Raw HTTP over TCP
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TIMEOUT = 10000;
+const MAX_REDIRECTS = 10;
+
+function buildRequest(method, path, host, extraHeaders = {}) {
+  const headers = {
+    Host: host,
+    'User-Agent': 'go2web/1.0',
+    Connection: 'close',
+    Accept: 'text/html,application/json;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    ...extraHeaders,
+  };
+  const headerLines = Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\r\n');
+  return `${method} ${path} HTTP/1.1\r\n${headerLines}\r\n\r\n`;
+}
+
+function parseResponse(raw) {
+  const sep = raw.indexOf('\r\n\r\n');
+  const headerEnd = sep !== -1 ? sep : raw.indexOf('\n\n');
+  const sepLen = sep !== -1 ? 4 : 2;
+
+  const headerSection = raw.substring(0, headerEnd);
+  const body = raw.substring(headerEnd + sepLen);
+
+  const lines = headerSection.split(/\r\n|\n/);
+  const statusLine = lines[0];
+  const statusCode = parseInt(statusLine.split(' ')[1], 10);
+
+  const headers = {};
+  for (let i = 1; i < lines.length; i++) {
+    const colon = lines[i].indexOf(':');
+    if (colon !== -1) {
+      const key = lines[i].substring(0, colon).trim().toLowerCase();
+      const val = lines[i].substring(colon + 1).trim();
+      headers[key] = val;
+    }
+  }
+
+  return { statusCode, headers, body };
+}
+
+function decodeChunked(body) {
+  let result = '';
+  let remaining = body;
+  while (remaining.length) {
+    const crlf = remaining.indexOf('\r\n');
+    if (crlf === -1) break;
+    const sizeHex = remaining.substring(0, crlf).split(';')[0].trim();
+    const size = parseInt(sizeHex, 16);
+    if (!size) break;
+    result += remaining.substring(crlf + 2, crlf + 2 + size);
+    remaining = remaining.substring(crlf + 2 + size + 2);
+  }
+  return result;
+}
+
+function rawRequest(urlStr, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(urlStr);
+    const scheme = parsed.protocol.slice(0, -1); // remove trailing ':'
+    const host = parsed.hostname;
+    const port = parsed.port
+      ? parseInt(parsed.port, 10)
+      : scheme === 'https' ? 443 : 80;
+    const path = (parsed.pathname || '/') + (parsed.search || '');
+    const hostHeader = parsed.port ? `${host}:${parsed.port}` : host;
+
+    const request = buildRequest('GET', path, hostHeader, extraHeaders);
+
+    const chunks = [];
+    const connectOpts = { host, port };
+
+    const onConnect = (socket) => {
+      socket.setTimeout(DEFAULT_TIMEOUT);
+      socket.on('timeout', () => { socket.destroy(new Error('Request timed out')); });
+      socket.on('error', reject);
+      socket.on('data', chunk => chunks.push(chunk));
+      socket.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('binary');
+        let { statusCode, headers, body } = parseResponse(raw);
+
+        if ((headers['transfer-encoding'] || '').toLowerCase() === 'chunked') {
+          body = decodeChunked(body);
+        }
+
+        // Convert body back from binary to proper string handling encoding
+        const charset = (headers['content-type'] || '').match(/charset=([^\s;]+)/i);
+        const enc = charset ? charset[1].toLowerCase() : 'utf-8';
+        const bodyBuf = Buffer.from(body, 'binary');
+        const bodyStr = bodyBuf.toString(enc === 'utf-8' || enc === 'utf8' ? 'utf8' : 'latin1');
+
+        resolve({ statusCode, headers, body: bodyStr });
+      });
+      socket.write(request);
+    };
+
+    if (scheme === 'https') {
+      const socket = tls.connect({ ...connectOpts, servername: host }, () => onConnect(socket));
+      socket.on('error', reject);
+    } else {
+      const socket = net.createConnection(connectOpts, () => onConnect(socket));
+      socket.on('error', reject);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// CLI commands
+// ---------------------------------------------------------------------------
+
+function showHelp() {
+  console.log(`go2web - HTTP client over raw TCP sockets
+
+Usage:
+  go2web -u <URL>          Make an HTTP request to the URL and print response
+  go2web -s <search-term>  Search the web and print top 10 results
+  go2web -h                Show this help message
+
+Examples:
+  go2web -u https://example.com
+  go2web -s python tcp sockets
+  go2web -s "hello world"
+`);
+}
+
+function parseArgs(argv) {
+  const result = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '-h') result.help = true;
+    else if (argv[i] === '-u' && argv[i + 1]) result.url = argv[++i];
+    else if (argv[i] === '-s') {
+      result.search = argv.slice(i + 1).join(' ');
+      break;
+    }
+  }
+  return result;
+}
+
+async function cmdUrl(url) {
+  const { statusCode, headers, body } = await rawRequest(url);
+  console.log(`[HTTP ${statusCode}]\n`);
+  console.log(body);
+}
+
+async function cmdSearch(term) {
+  console.log(`[stub] Searching: ${term}`);
+}
+
+async function main() {
+  const opts = parseArgs(args);
+
+  if (opts.help || args.length === 0) {
+    showHelp();
+  } else if (opts.url) {
+    await cmdUrl(opts.url);
+  } else if (opts.search) {
+    await cmdSearch(opts.search);
+  } else {
+    showHelp();
+  }
+}
+
+main().catch(err => {
+  console.error('Error:', err.message);
+  process.exit(1);
+});

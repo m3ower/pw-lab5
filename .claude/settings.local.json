@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /c/Users/gurev/WebstormProjects/pw-lab5/go2web)",
+      "Bash(python /c/Users/gurev/WebstormProjects/pw-lab5/go2web -h)",
+      "Bash(python /c/Users/gurev/WebstormProjects/pw-lab5/go2web -u http://example.com)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(npm --version)",
+      "Bash(npm init:*)",
+      "Bash(node:*)"
+    ]
+  }
+}
