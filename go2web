@@ -190,8 +190,27 @@ function parseArgs(argv) {
   return result;
 }
 
+async function fetchWithRedirects(url, extraHeaders = {}) {
+  let currentUrl = url;
+  for (let i = 0; i < MAX_REDIRECTS; i++) {
+    const result = await rawRequest(currentUrl, extraHeaders);
+    const { statusCode, headers } = result;
+    if ([301, 302, 303, 307, 308].includes(statusCode) && headers['location']) {
+      const location = headers['location'];
+      // Resolve relative redirects
+      currentUrl = location.startsWith('http')
+        ? location
+        : new URL(location, currentUrl).toString();
+      process.stderr.write(`  → redirect to ${currentUrl}\n`);
+    } else {
+      return result;
+    }
+  }
+  throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+}
+
 async function cmdUrl(url) {
-  const { statusCode, headers, body } = await rawRequest(url);
+  const { statusCode, headers, body } = await fetchWithRedirects(url);
   const contentType = headers['content-type'] || '';
   console.log(`[HTTP ${statusCode}]\n`);
   if (contentType.includes('text/html')) {
