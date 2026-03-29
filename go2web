@@ -3,6 +3,7 @@
 
 const net = require('net');
 const tls = require('tls');
+const readline = require('readline');
 const { URL } = require('url');
 const cheerio = require('cheerio');
 
@@ -18,10 +19,11 @@ const MAX_REDIRECTS = 10;
 function buildRequest(method, path, host, extraHeaders = {}) {
   const headers = {
     Host: host,
-    'User-Agent': 'go2web/1.0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     Connection: 'close',
-    Accept: 'text/html,application/json;q=0.9,*/*;q=0.8',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'identity',
     ...extraHeaders,
   };
   const headerLines = Object.entries(headers)
@@ -30,44 +32,51 @@ function buildRequest(method, path, host, extraHeaders = {}) {
   return `${method} ${path} HTTP/1.1\r\n${headerLines}\r\n\r\n`;
 }
 
-function parseResponse(raw) {
-  const sep = raw.indexOf('\r\n\r\n');
-  const headerEnd = sep !== -1 ? sep : raw.indexOf('\n\n');
-  const sepLen = sep !== -1 ? 4 : 2;
+const CRLF2 = Buffer.from('\r\n\r\n');
+const CRLF  = Buffer.from('\r\n');
 
-  const headerSection = raw.substring(0, headerEnd);
-  const body = raw.substring(headerEnd + sepLen);
+function parseResponse(rawBuf) {
+  // Find end of headers
+  let headerEnd = -1;
+  let sepLen = 4;
+  for (let i = 0; i < rawBuf.length - 3; i++) {
+    if (rawBuf[i] === 13 && rawBuf[i+1] === 10 && rawBuf[i+2] === 13 && rawBuf[i+3] === 10) {
+      headerEnd = i; break;
+    }
+  }
+  if (headerEnd === -1) { headerEnd = rawBuf.indexOf('\n\n'); sepLen = 2; }
+
+  const headerSection = rawBuf.subarray(0, headerEnd).toString('utf8');
+  const bodyBuf = rawBuf.subarray(headerEnd + sepLen);
 
   const lines = headerSection.split(/\r\n|\n/);
-  const statusLine = lines[0];
-  const statusCode = parseInt(statusLine.split(' ')[1], 10);
+  const statusCode = parseInt(lines[0].split(' ')[1], 10);
 
   const headers = {};
   for (let i = 1; i < lines.length; i++) {
     const colon = lines[i].indexOf(':');
     if (colon !== -1) {
-      const key = lines[i].substring(0, colon).trim().toLowerCase();
-      const val = lines[i].substring(colon + 1).trim();
-      headers[key] = val;
+      headers[lines[i].substring(0, colon).trim().toLowerCase()] =
+        lines[i].substring(colon + 1).trim();
     }
   }
 
-  return { statusCode, headers, body };
+  return { statusCode, headers, bodyBuf };
 }
 
-function decodeChunked(body) {
-  let result = '';
-  let remaining = body;
-  while (remaining.length) {
-    const crlf = remaining.indexOf('\r\n');
+function decodeChunked(buf) {
+  const parts = [];
+  let pos = 0;
+  while (pos < buf.length) {
+    const crlf = buf.indexOf(CRLF, pos);
     if (crlf === -1) break;
-    const sizeHex = remaining.substring(0, crlf).split(';')[0].trim();
-    const size = parseInt(sizeHex, 16);
+    const sizeLine = buf.subarray(pos, crlf).toString('ascii').split(';')[0].trim();
+    const size = parseInt(sizeLine, 16);
     if (!size) break;
-    result += remaining.substring(crlf + 2, crlf + 2 + size);
-    remaining = remaining.substring(crlf + 2 + size + 2);
+    parts.push(buf.subarray(crlf + 2, crlf + 2 + size));
+    pos = crlf + 2 + size + 2;
   }
-  return result;
+  return Buffer.concat(parts);
 }
 
 function rawRequest(urlStr, extraHeaders = {}) {
@@ -92,20 +101,18 @@ function rawRequest(urlStr, extraHeaders = {}) {
       socket.on('error', reject);
       socket.on('data', chunk => chunks.push(chunk));
       socket.on('end', () => {
-        const raw = Buffer.concat(chunks).toString('binary');
-        let { statusCode, headers, body } = parseResponse(raw);
+        const rawBuf = Buffer.concat(chunks);
+        let { statusCode, headers, bodyBuf } = parseResponse(rawBuf);
 
         if ((headers['transfer-encoding'] || '').toLowerCase() === 'chunked') {
-          body = decodeChunked(body);
+          bodyBuf = decodeChunked(bodyBuf);
         }
 
-        // Convert body back from binary to proper string handling encoding
         const charset = (headers['content-type'] || '').match(/charset=([^\s;]+)/i);
-        const enc = charset ? charset[1].toLowerCase() : 'utf-8';
-        const bodyBuf = Buffer.from(body, 'binary');
-        const bodyStr = bodyBuf.toString(enc === 'utf-8' || enc === 'utf8' ? 'utf8' : 'latin1');
+        const enc = charset ? charset[1].toLowerCase().replace('-', '') : 'utf8';
+        const body = bodyBuf.toString(enc === 'utf8' ? 'utf8' : 'latin1');
 
-        resolve({ statusCode, headers, body: bodyStr });
+        resolve({ statusCode, headers, body });
       });
       socket.write(request);
     };
@@ -222,7 +229,7 @@ async function cmdUrl(url) {
 
 async function cmdSearch(term) {
   const query = encodeURIComponent(term);
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${query}`;
+  const searchUrl = `https://lite.duckduckgo.com/lite/?q=${query}`;
 
   const { statusCode, headers, body } = await fetchWithRedirects(searchUrl, {
     Accept: 'text/html',
@@ -236,23 +243,25 @@ async function cmdSearch(term) {
   const $ = cheerio.load(body);
   const results = [];
 
-  $('.result__body').each((_, el) => {
+  $('a.result-link').each((_, el) => {
     if (results.length >= 10) return;
-    const titleEl = $(el).find('.result__a');
-    const snippetEl = $(el).find('.result__snippet');
-    const title = titleEl.text().trim();
-    const href = titleEl.attr('href') || '';
-    const snippet = snippetEl.text().trim();
+    const title = $(el).text().trim();
+    const rawHref = $(el).attr('href') || '';
 
-    // DDG wraps links — extract the real URL from uddg= param
-    let url = href;
+    // Extract real URL from DDG redirect wrapper
+    let url = rawHref;
     try {
-      const u = new URL('https://duckduckgo.com' + href);
+      const u = new URL('https://duckduckgo.com' + rawHref);
       const uddg = u.searchParams.get('uddg');
       if (uddg) url = decodeURIComponent(uddg);
-    } catch (_) {}
+    } catch (_) {
+      if (rawHref.startsWith('//')) url = 'https:' + rawHref;
+    }
 
-    if (title && url) results.push({ title, url, snippet });
+    // Snippet is in the next table row
+    const snippet = $(el).closest('tr').next('tr').find('.result-snippet').text().trim();
+
+    if (title && url.startsWith('http')) results.push({ title, url, snippet });
   });
 
   if (results.length === 0) {
@@ -265,6 +274,35 @@ async function cmdSearch(term) {
     console.log(`   ${r.url}`);
     if (r.snippet) console.log(`   ${r.snippet}`);
     console.log();
+  });
+
+  await promptOpenResult(results);
+}
+
+function promptOpenResult(results) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('Open result (1-10) or press Enter to quit: ', async (answer) => {
+      rl.close();
+      const n = parseInt(answer, 10);
+      if (!isNaN(n) && n >= 1 && n <= results.length) {
+        const chosen = results[n - 1];
+        console.log(`\nFetching: ${chosen.url}\n`);
+        try {
+          const { statusCode, headers, body } = await fetchWithRedirects(chosen.url);
+          const contentType = headers['content-type'] || '';
+          console.log(`[HTTP ${statusCode}]\n`);
+          if (contentType.includes('text/html')) {
+            console.log(htmlToText(body));
+          } else {
+            console.log(body);
+          }
+        } catch (e) {
+          console.error(`Error: ${e.message}`);
+        }
+      }
+      resolve();
+    });
   });
 }
 
