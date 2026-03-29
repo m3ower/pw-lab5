@@ -110,7 +110,7 @@ function rawRequest(urlStr, extraHeaders = {}) {
     };
 
     if (scheme === 'https') {
-      const socket = tls.connect({ ...connectOpts, servername: host }, () => onConnect(socket));
+      const socket = tls.connect({ ...connectOpts, servername: host, rejectUnauthorized: false }, () => onConnect(socket));
       socket.on('error', reject);
     } else {
       const socket = net.createConnection(connectOpts, () => onConnect(socket));
