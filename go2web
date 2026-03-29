@@ -276,15 +276,29 @@ async function fetchWithRedirects(url, extraHeaders = {}) {
   throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
 }
 
-async function cmdUrl(url) {
-  const { statusCode, headers, body } = await fetchWithRedirects(url);
+function formatBody(headers, body) {
   const contentType = headers['content-type'] || '';
-  console.log(`[HTTP ${statusCode}]\n`);
-  if (contentType.includes('text/html')) {
-    console.log(htmlToText(body));
-  } else {
-    console.log(body);
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.stringify(JSON.parse(body), null, 2);
+    } catch (_) {
+      return body;
+    }
   }
+  if (contentType.includes('text/html')) {
+    return htmlToText(body);
+  }
+  return body;
+}
+
+async function cmdUrl(url) {
+  // Advertise both JSON and HTML; prefer JSON if available
+  const { statusCode, headers, body } = await fetchWithRedirects(url, {
+    Accept: 'application/json,text/html;q=0.9,*/*;q=0.8',
+  });
+  const contentType = headers['content-type'] || '';
+  console.log(`[HTTP ${statusCode}] [${contentType}]\n`);
+  console.log(formatBody(headers, body));
 }
 
 async function cmdSearch(term) {
@@ -349,14 +363,12 @@ function promptOpenResult(results) {
         const chosen = results[n - 1];
         console.log(`\nFetching: ${chosen.url}\n`);
         try {
-          const { statusCode, headers, body } = await fetchWithRedirects(chosen.url);
+          const { statusCode, headers, body } = await fetchWithRedirects(chosen.url, {
+            Accept: 'application/json,text/html;q=0.9,*/*;q=0.8',
+          });
           const contentType = headers['content-type'] || '';
-          console.log(`[HTTP ${statusCode}]\n`);
-          if (contentType.includes('text/html')) {
-            console.log(htmlToText(body));
-          } else {
-            console.log(body);
-          }
+          console.log(`[HTTP ${statusCode}] [${contentType}]\n`);
+          console.log(formatBody(headers, body));
         } catch (e) {
           console.error(`Error: ${e.message}`);
         }
