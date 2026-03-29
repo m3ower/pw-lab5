@@ -4,6 +4,7 @@
 const net = require('net');
 const tls = require('tls');
 const { URL } = require('url');
+const cheerio = require('cheerio');
 
 const args = process.argv.slice(2);
 
@@ -120,6 +121,44 @@ function rawRequest(urlStr, extraHeaders = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// HTML → plain text
+// ---------------------------------------------------------------------------
+
+function htmlToText(html) {
+  const $ = cheerio.load(html);
+
+  // Remove non-content elements
+  $('script, style, noscript, head').remove();
+
+  // Replace block-level elements with newlines
+  $('br').replaceWith('\n');
+  $('p, div, section, article, header, footer, li, tr, h1, h2, h3, h4, h5, h6').each((_, el) => {
+    $(el).prepend('\n');
+    $(el).append('\n');
+  });
+  $('h1, h2, h3').each((_, el) => {
+    const text = $(el).text().trim();
+    const level = el.name;
+    const underline = level === 'h1' ? '=' : level === 'h2' ? '-' : '~';
+    $(el).replaceWith(`\n${text}\n${underline.repeat(text.length)}\n`);
+  });
+
+  // Show link URLs inline
+  $('a').each((_, el) => {
+    const href = $(el).attr('href');
+    const text = $(el).text().trim();
+    if (href && !href.startsWith('#') && !href.startsWith('javascript')) {
+      $(el).replaceWith(href.startsWith('http') ? `${text} [${href}]` : text);
+    }
+  });
+
+  let text = $.text();
+  // Collapse excessive blank lines
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text;
+}
+
+// ---------------------------------------------------------------------------
 // CLI commands
 // ---------------------------------------------------------------------------
 
@@ -153,8 +192,13 @@ function parseArgs(argv) {
 
 async function cmdUrl(url) {
   const { statusCode, headers, body } = await rawRequest(url);
+  const contentType = headers['content-type'] || '';
   console.log(`[HTTP ${statusCode}]\n`);
-  console.log(body);
+  if (contentType.includes('text/html')) {
+    console.log(htmlToText(body));
+  } else {
+    console.log(body);
+  }
 }
 
 async function cmdSearch(term) {

@@ -8,7 +8,8 @@
       "Bash(pip install:*)",
       "Bash(npm --version)",
       "Bash(npm init:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(npm install:*)"
     ]
   }
 }

@@ -17,5 +17,8 @@
   "bugs": {
     "url": "https://github.com/m3ower/pw-lab5/issues"
   },
-  "homepage": "https://github.com/m3ower/pw-lab5#readme"
+  "homepage": "https://github.com/m3ower/pw-lab5#readme",
+  "dependencies": {
+    "cheerio": "^1.2.0"
+  }
 }
