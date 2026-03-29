@@ -10,7 +10,8 @@
       "Bash(npm init:*)",
       "Bash(node:*)",
       "Bash(npm install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(cat ~/.go2web-cache/*.json)"
     ]
   }
 }

@@ -3,6 +3,9 @@
 
 const net = require('net');
 const tls = require('tls');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const readline = require('readline');
 const { URL } = require('url');
 const cheerio = require('cheerio');
@@ -128,6 +131,54 @@ function rawRequest(urlStr, extraHeaders = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// File-based HTTP cache
+// ---------------------------------------------------------------------------
+
+const CACHE_DIR = path.join(require('os').homedir(), '.go2web-cache');
+const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function ensureCacheDir() {
+  if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+function cacheKey(url) {
+  return crypto.createHash('sha1').update(url).digest('hex');
+}
+
+function cacheGet(url) {
+  ensureCacheDir();
+  const file = path.join(CACHE_DIR, cacheKey(url) + '.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    const entry = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Date.now() < entry.expiresAt) return entry.response;
+    fs.unlinkSync(file); // expired
+  } catch (_) {}
+  return null;
+}
+
+function cacheSet(url, response) {
+  ensureCacheDir();
+  const { headers } = response;
+
+  let ttlMs = DEFAULT_TTL_MS;
+  const cc = headers['cache-control'] || '';
+  const maxAgeMatch = cc.match(/max-age=(\d+)/i);
+  if (maxAgeMatch) {
+    ttlMs = parseInt(maxAgeMatch[1], 10) * 1000;
+  } else if (headers['expires']) {
+    const exp = Date.parse(headers['expires']);
+    if (!isNaN(exp)) ttlMs = Math.max(0, exp - Date.now());
+  }
+
+  if (ttlMs <= 0) return; // don't cache no-store/no-cache responses
+
+  const entry = { expiresAt: Date.now() + ttlMs, response };
+  const file = path.join(CACHE_DIR, cacheKey(url) + '.json');
+  fs.writeFileSync(file, JSON.stringify(entry), 'utf8');
+}
+
+// ---------------------------------------------------------------------------
 // HTML → plain text
 // ---------------------------------------------------------------------------
 
@@ -200,16 +251,25 @@ function parseArgs(argv) {
 async function fetchWithRedirects(url, extraHeaders = {}) {
   let currentUrl = url;
   for (let i = 0; i < MAX_REDIRECTS; i++) {
+    // Check cache before making a network request
+    const cached = cacheGet(currentUrl);
+    if (cached) {
+      process.stderr.write(`  [CACHE HIT] ${currentUrl}\n`);
+      return cached;
+    }
+
     const result = await rawRequest(currentUrl, extraHeaders);
     const { statusCode, headers } = result;
+
     if ([301, 302, 303, 307, 308].includes(statusCode) && headers['location']) {
       const location = headers['location'];
-      // Resolve relative redirects
       currentUrl = location.startsWith('http')
         ? location
         : new URL(location, currentUrl).toString();
       process.stderr.write(`  → redirect to ${currentUrl}\n`);
     } else {
+      // Cache successful responses
+      if (statusCode === 200) cacheSet(currentUrl, result);
       return result;
     }
   }
