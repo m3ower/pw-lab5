@@ -12,6 +12,9 @@ const cheerio = require('cheerio');
 
 const args = process.argv.slice(2);
 
+let debugMode = false;
+function dbg(msg) { if (debugMode) process.stderr.write(`\x1b[36m[DEBUG]\x1b[0m ${msg}\n`); }
+
 // ---------------------------------------------------------------------------
 // Raw HTTP over TCP
 // ---------------------------------------------------------------------------
@@ -97,13 +100,18 @@ function rawRequest(urlStr, extraHeaders = {}) {
 
     const chunks = [];
     const connectOpts = { host, port };
+    const socketType = scheme === 'https' ? 'TLS' : 'TCP';
+    dbg(`Creating ${socketType} socket → ${host}:${port}`);
 
     const onConnect = (socket) => {
+      dbg(`${socketType} socket connected to ${host}:${port}`);
       socket.setTimeout(DEFAULT_TIMEOUT);
       socket.on('timeout', () => { socket.destroy(new Error('Request timed out')); });
       socket.on('error', reject);
-      socket.on('data', chunk => chunks.push(chunk));
+      let bytesReceived = 0;
+      socket.on('data', chunk => { chunks.push(chunk); bytesReceived += chunk.length; });
       socket.on('end', () => {
+        dbg(`Response fully received (${bytesReceived} bytes)`);
         const rawBuf = Buffer.concat(chunks);
         let { statusCode, headers, bodyBuf } = parseResponse(rawBuf);
 
@@ -117,6 +125,7 @@ function rawRequest(urlStr, extraHeaders = {}) {
 
         resolve({ statusCode, headers, body });
       });
+      dbg(`Sending HTTP request:\n         GET ${path} HTTP/1.1\n         Host: ${hostHeader}`);
       socket.write(request);
     };
 
@@ -171,7 +180,7 @@ function cacheSet(url, response) {
     if (!isNaN(exp)) ttlMs = Math.max(0, exp - Date.now());
   }
 
-  if (ttlMs <= 0) return; // don't cache no-store/no-cache responses
+  if (ttlMs <= 0) ttlMs = DEFAULT_TTL_MS;
 
   const entry = { expiresAt: Date.now() + ttlMs, response };
   const file = path.join(CACHE_DIR, cacheKey(url) + '.json');
@@ -227,9 +236,11 @@ Usage:
   go2web -u <URL>          Make an HTTP request to the URL and print response
   go2web -s <search-term>  Search the web and print top 10 results
   go2web -h                Show this help message
+  go2web -d                Enable debug mode (shows TCP/TLS connection, redirects, cache, timing)
 
 Examples:
   go2web -u https://example.com
+  go2web -d -u https://example.com
   go2web -s python tcp sockets
   go2web -s "hello world"
 `);
@@ -239,6 +250,7 @@ function parseArgs(argv) {
   const result = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '-h') result.help = true;
+    else if (argv[i] === '-d') result.debug = true;
     else if (argv[i] === '-u' && argv[i + 1]) result.url = argv[++i];
     else if (argv[i] === '-s') {
       result.search = argv.slice(i + 1).join(' ');
@@ -250,26 +262,35 @@ function parseArgs(argv) {
 
 async function fetchWithRedirects(url, extraHeaders = {}) {
   let currentUrl = url;
+  let redirectCount = 0;
+  const totalStart = Date.now();
+
   for (let i = 0; i < MAX_REDIRECTS; i++) {
-    // Check cache before making a network request
     const cached = cacheGet(currentUrl);
     if (cached) {
       process.stderr.write(`  [CACHE HIT] ${currentUrl}\n`);
+      dbg(`Cache hit for ${currentUrl} — skipping network request`);
       return cached;
     }
 
+    dbg(`Request #${i + 1}: GET ${currentUrl}`);
+    const reqStart = Date.now();
     const result = await rawRequest(currentUrl, extraHeaders);
+    const reqMs = Date.now() - reqStart;
     const { statusCode, headers } = result;
+    dbg(`Response: HTTP ${statusCode} (${reqMs}ms)`);
 
     if ([301, 302, 303, 307, 308].includes(statusCode) && headers['location']) {
+      redirectCount++;
       const location = headers['location'];
       currentUrl = location.startsWith('http')
         ? location
         : new URL(location, currentUrl).toString();
       process.stderr.write(`  → redirect to ${currentUrl}\n`);
+      dbg(`Redirect #${redirectCount} (HTTP ${statusCode}) → ${currentUrl}`);
     } else {
-      // Cache successful responses
       if (statusCode === 200) cacheSet(currentUrl, result);
+      dbg(`Total time: ${Date.now() - totalStart}ms | Redirects followed: ${redirectCount}`);
       return result;
     }
   }
@@ -380,6 +401,8 @@ function promptOpenResult(results) {
 
 async function main() {
   const opts = parseArgs(args);
+
+  if (opts.debug) debugMode = true;
 
   if (opts.help || args.length === 0) {
     showHelp();
